@@ -5,7 +5,7 @@ const details = () => ({
   Type: 'Audio',
   Operation: 'Transcode',
   Description: 'This plugin converts mono audio tracks to stereo format using a high-quality upmixing algorithm. \n\n',
-  Version: '1.1',
+  Version: '1.3',
   Link: "https://github.com/jordanlambrecht",
   Tags: 'pre-processing,ffmpeg,audio only,configurable',
   Inputs: [
@@ -34,7 +34,7 @@ const details = () => ({
         type: 'text',
       },
       tooltip: `Set the stereo enhancement level (1.0-2.5).
-               Higher values create more separation but may sound artificial.
+               Higher values create more separation but may sound artificial. This option is only used in 'Quality' mode.\\n
                1.0 = no enhancement, 1.7 = recommended for most content
                \\nExample:\\n
                1.7
@@ -45,7 +45,7 @@ const details = () => ({
     {
       name: 'audio_bitrate',
       type: 'string',
-      defaultValue: '192',
+      defaultValue: 'Keep Original',
       inputUI: {
         type: 'dropdown',
         options: [
@@ -59,9 +59,9 @@ const details = () => ({
         ],
       },
       tooltip: `Select output audio bitrate in kbps.
-               'Keep Original' will attempt to maintain the same bitrate as the source.
+               'Keep Original' will attempt to maintain the same bitrate as the source.\\n
                Higher values provide better quality but larger file size.
-               192 is recommended for most content.`,
+               192 is recommended for most content.\\nSetting it to 'Keep Original' will be the fastest option.`,
     },
     {
       name: 'remove_original',
@@ -94,7 +94,22 @@ const details = () => ({
                
                \\nExample:\\n
                jpn,kor`,
-    }
+    },
+    {
+      name: 'upmix_mode',
+      type: 'string',
+      defaultValue: 'Quality',
+      inputUI: {
+        type: 'dropdown',
+        options: [
+          'Quality',
+          'Speed'
+        ],
+      },
+      tooltip: `Select upmixing algorithm mode:
+             'Quality' - Uses extrastereo filter for better spatial separation (slower)
+             'Speed' - Uses simple channel duplication for fastest processing`,
+    },
   ],
 });
 
@@ -142,11 +157,16 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     .map(lang => lang.trim())
     .filter(lang => lang !== ''));
   
+  // Parse upmix mode
+  const upmixMode = inputs.upmix_mode || 'Quality';
+  const isSpeedMode = upmixMode === 'Speed';
+
   // Log input parameters
-  response.infoLog += `ℹ️ Parameters: Codecs=${codecs}, Enhancement=${safeExtrastereoAmount}, `;
+  response.infoLog += `🧮 Parameters: Codecs=${codecs}, Enhancement=${safeExtrastereoAmount}, `;
   response.infoLog += `Bitrate=${useOriginalBitrate ? 'Keep Original' : safeAudioBitrate + 'k'}, `;
   response.infoLog += `Remove Original=${removeOriginal}, `;
-  response.infoLog += `Languages=${languagesToProcess.length > 0 ? languagesToProcess.join(',') : 'all'}\n`;
+  response.infoLog += `Languages=${languagesToProcess.length > 0 ? languagesToProcess.join(',') : 'all'}, `;
+  response.infoLog += `Upmix Mode=${upmixMode}, \n`;
   
   // Store all audio streams and their properties for reference
   const audioStreams = [];
@@ -220,10 +240,10 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
           }
           response.infoLog += `)\n`;
         } else {
-          response.infoLog += `ℹ️ Skipping: mono track ${i} - doesn't match filters\n`;
+          response.infoLog += `↪️ Skipping: mono track ${i} - doesn't match filters\n`;
         }
       } else {
-        response.infoLog += `ℹ️ Skipping: audio track ${i} - already has ${streamInfo.channels} channels\n`;
+        response.infoLog += `↪️ Skipping: audio track ${i} - already has ${streamInfo.channels} channels\n`;
       }
       
       // Add to audio streams array
@@ -241,12 +261,23 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     
     // For each mono stream to convert, add a filter chain
     monoStreamsToConvert.forEach((stream, idx) => {
-      filterComplex.push(
-        `[0:${stream.absoluteIndex}]` +
-        `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
-        `extrastereo=m=${safeExtrastereoAmount}` +
-        `[stereo${idx}]`
-      );
+      if (isSpeedMode) {
+        // Speed mode: Simple channel duplication without sample rate conversion
+        filterComplex.push(
+          `[0:${stream.absoluteIndex}]` +
+          `aformat=channel_layouts=stereo,` +
+          `pan=stereo|c0=c0|c1=c0` + // Simple duplication of mono channel
+          `[stereo${idx}]`
+        );
+      } else {
+        // Quality mode: Full extrastereo processing with sample rate conversion
+        filterComplex.push(
+          `[0:${stream.absoluteIndex}]` +
+          `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+          `extrastereo=m=${safeExtrastereoAmount}` +
+          `[stereo${idx}]`
+        );
+      }
     });
     
     // Now build the full command
@@ -274,6 +305,9 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     
     // Copy all non-modified streams
     ffmpegCommandInsert += `-c copy `;
+    
+   // REVIST
+    ffmpegCommandInsert += `-threads 0 `; // Use optimal thread count
     
     // Handle the new stereo streams
     monoStreamsToConvert.forEach((stream, idx) => {
@@ -307,6 +341,26 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
         ffmpegCommandInsert += `-metadata:s:a:#STREAMIDX# title="Stereo" `;
       }
       
+      // Capture all other metadata tags
+      if (stream.tags) {
+        Object.entries(stream.tags).forEach(([key, value]) => {
+          // Skip language and title which we've already handled specifically
+          if (key !== 'language' && key !== 'title') {
+            ffmpegCommandInsert += `-metadata:s:a:#STREAMIDX# ${key}="${value}" `;
+          }
+        });
+      }
+
+      // Preserve all disposition flags
+      if (stream.disposition) {
+        Object.entries(stream.disposition).forEach(([key, value]) => {
+          // Skip default flag which we've already handled
+          if (key !== 'default' && value === 1) {
+            ffmpegCommandInsert += `-disposition:a:#STREAMIDX# ${key} `;
+          }
+        });
+      }
+
       // Make the first converted stream default if the original was default
       if (stream.default) {
         ffmpegCommandInsert += `-disposition:a:#STREAMIDX# default `;
@@ -322,6 +376,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     response.infoLog += `${removeOriginal ? '🔄 Original mono tracks will be removed' : '👍 Original mono tracks will be kept'}\n`;
     response.infoLog += `🔊 Using enhancement level: ${safeExtrastereoAmount}\n`;
     response.infoLog += `🔊 ${useOriginalBitrate ? 'Using original bitrates where available' : 'Using bitrate: ' + safeAudioBitrate + 'k'}\n`;
+    response.infoLog += `🎧 Using ${isSpeedMode ? 'speed-optimized' : 'quality-optimized'} upmixing algorithm\n`;
   } else {
     response.infoLog += '✅ No mono tracks to convert\n';
   }
