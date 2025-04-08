@@ -5,20 +5,20 @@ const details = () => ({
   Type: 'Audio',
   Operation: 'Transcode',
   Description: 'This plugin converts mono audio tracks to stereo format using a high-quality upmixing algorithm. \n\n',
-  Version: '1.3',
+  Version: '1.4',
   Link: "https://github.com/jordanlambrecht",
   Tags: 'pre-processing,ffmpeg,audio only,configurable',
   Inputs: [
     {
       name: 'codecs',
       type: 'string',
-      defaultValue: 'all',
+      defaultValue: '',
       inputUI: {
         type: 'text',
       },
-      tooltip: `Enter comma-separated list of audio codecs to process or 'all' for all codecs.
+      tooltip: `Enter comma-separated list of audio codecs to process or leave blank for all codecs.
                \\nExample:\\n
-               all
+               (leave blank for all codecs)
                
                \\nExample:\\n
                aac,mp3
@@ -34,7 +34,7 @@ const details = () => ({
         type: 'text',
       },
       tooltip: `Set the stereo enhancement level (1.0-2.5).
-               Higher values create more separation but may sound artificial. This option is only used in 'Quality' mode.\\n
+               Higher values create more separation but may sound artificial. Don't touch this if you  don't know what you're doing. This option is only used in 'Quality' mode.\\n
                1.0 = no enhancement, 1.7 = recommended for most content
                \\nExample:\\n
                1.7
@@ -135,8 +135,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   }
 
   // Parse inputs with safety checks
-  const codecs = inputs.codecs ? inputs.codecs.toLowerCase().trim() : 'all';
-  const codecsToProcess = codecs === 'all' ? [] : 
+  const codecs = inputs.codecs ? inputs.codecs.toLowerCase().trim() : '';
+  const codecsToProcess = codecs === '' || codecs === 'all' ? [] : 
                           codecs.split(',').map(codec => codec.trim()).filter(codec => codec !== '');
   
   const extrastereoAmount = parseFloat(inputs.extrastereo_amount || '1.7');
@@ -162,7 +162,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   const isSpeedMode = upmixMode === 'Speed';
 
   // Log input parameters
-  response.infoLog += `🧮 Parameters: Codecs=${codecs}, Enhancement=${safeExtrastereoAmount}, `;
+  response.infoLog += `🧮 Parameters: Codecs=${codecs === '' ? 'all' : codecs}, Enhancement=${safeExtrastereoAmount}, `;
   response.infoLog += `Bitrate=${useOriginalBitrate ? 'Keep Original' : safeAudioBitrate + 'k'}, `;
   response.infoLog += `Remove Original=${removeOriginal}, `;
   response.infoLog += `Languages=${languagesToProcess.length > 0 ? languagesToProcess.join(',') : 'all'}, `;
