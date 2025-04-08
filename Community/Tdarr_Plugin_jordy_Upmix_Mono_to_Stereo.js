@@ -5,7 +5,7 @@ const details = () => ({
   Type: 'Audio',
   Operation: 'Transcode',
   Description: 'This plugin converts mono audio tracks to stereo format using a high-quality upmixing algorithm. \n\n',
-  Version: '1.4',
+  Version: '1.5',
   Link: "https://github.com/jordanlambrecht",
   Tags: 'pre-processing,ffmpeg,audio only,configurable',
   Inputs: [
@@ -223,7 +223,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
       // Check if this is a mono track to convert
       if (streamInfo.channels === 1) {
         // Check if we should process this track based on codec and language filters
-        const codecMatches = codecs === 'all' || codecsToProcess.includes(streamInfo.codec);
+        const codecMatches = codecs === '' || codecs === 'all' || codecsToProcess.includes(streamInfo.codec);
         const languageMatches = languagesToProcess.length === 0 || 
                               (streamInfo.language && languagesToProcess.includes(streamInfo.language.toLowerCase()));
         
