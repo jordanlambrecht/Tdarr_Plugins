@@ -5,7 +5,7 @@ const details = () => ({
   Type: 'Audio',
   Operation: 'Transcode',
   Description: 'This plugin converts mono audio tracks to stereo format using a high-quality upmixing algorithm. \n\n',
-  Version: '1.5',
+  Version: '1.6',
   Link: "https://github.com/jordanlambrecht",
   Tags: 'pre-processing,ffmpeg,audio only,configurable',
   Inputs: [
@@ -134,7 +134,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     return response;
   }
 
-  // Parse inputs with safety checks
+  // Parse inputs
   const codecs = inputs.codecs ? inputs.codecs.toLowerCase().trim() : '';
   const codecsToProcess = codecs === '' || codecs === 'all' ? [] : 
                           codecs.split(',').map(codec => codec.trim()).filter(codec => codec !== '');
@@ -161,7 +161,7 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   const upmixMode = inputs.upmix_mode || 'Quality';
   const isSpeedMode = upmixMode === 'Speed';
 
-  // Log input parameters
+
   response.infoLog += `🧮 Parameters: Codecs=${codecs === '' ? 'all' : codecs}, Enhancement=${safeExtrastereoAmount}, `;
   response.infoLog += `Bitrate=${useOriginalBitrate ? 'Keep Original' : safeAudioBitrate + 'k'}, `;
   response.infoLog += `Remove Original=${removeOriginal}, `;
@@ -255,121 +255,81 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
   if (monoStreamsToConvert.length > 0) {
     response.processFile = true;
     
-    // Build the FFmpeg command properly
-    // Start with a filter complex array for better maintainability
+
     const filterComplex = [];
     
     // For each mono stream to convert, add a filter chain
     monoStreamsToConvert.forEach((stream, idx) => {
       if (isSpeedMode) {
-        // Speed mode: Simple channel duplication without sample rate conversion
+        // Simpler pan filter for speed mode
         filterComplex.push(
-          `[0:${stream.absoluteIndex}]` +
-          `aformat=channel_layouts=stereo,` +
-          `pan=stereo|c0=c0|c1=c0` + // Simple duplication of mono channel
-          `[stereo${idx}]`
+          `[0:${stream.absoluteIndex}]pan=stereo|c0=c0|c1=c0[stereo${idx}]`
         );
       } else {
-        // Quality mode: Full extrastereo processing with sample rate conversion
+        // Quality mode with extrastereo filter
         filterComplex.push(
-          `[0:${stream.absoluteIndex}]` +
-          `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
-          `extrastereo=m=${safeExtrastereoAmount}` +
-          `[stereo${idx}]`
+          `[0:${stream.absoluteIndex}]pan=stereo|c0=c0|c1=c0,extrastereo=m=${safeExtrastereoAmount}[stereo${idx}]`
         );
       }
     });
-    
-    // Now build the full command
+
     let ffmpegCommandInsert = '';
-    
-    // Add filter complex if we have filters
+
     if (filterComplex.length > 0) {
-      ffmpegCommandInsert += `-filter_complex "${filterComplex.join(';')}" `;
+      ffmpegCommandInsert += `-filter_complex ${filterComplex.join(';')} `;
     }
-    
-    // Map all original streams
+
     ffmpegCommandInsert += `-map 0 `;
-    
-    // If removing originals, remove the mono streams we're converting
+
+    // Remove original mono tracks if enabled
     if (removeOriginal) {
       monoStreamsToConvert.forEach(stream => {
         ffmpegCommandInsert += `-map -0:${stream.absoluteIndex} `;
       });
     }
-    
-    // Add converted stereo streams
+
+    // Add all converted stereo streams
     monoStreamsToConvert.forEach((stream, idx) => {
-      ffmpegCommandInsert += `-map "[stereo${idx}]" `;
+      ffmpegCommandInsert += `-map [stereo${idx}] `;
     });
-    
-    // Copy all non-modified streams
+
+    // Set global copy for all unchanged streams
     ffmpegCommandInsert += `-c copy `;
-    
-   // REVIST
-    ffmpegCommandInsert += `-threads 0 `; // Use optimal thread count
-    
-    // Handle the new stereo streams
+
+    // Calculate number of audio streams that will remain in the output
+    let remainingAudioStreams = audioStreams.length;
+    if (removeOriginal) {
+      remainingAudioStreams -= monoStreamsToConvert.length;
+    }
+
+    // Configure codec settings for each new stream
     monoStreamsToConvert.forEach((stream, idx) => {
-      // Calculate the output stream index based on mappings
-      // This is complex because the index depends on whether we're removing originals
-      // and how many streams we've already processed
+      // New streams will be appended starting at this index
+      const newStreamIndex = remainingAudioStreams + idx;
       
-      // New streams will be added at the end, so we need to determine the index
-      ffmpegCommandInsert += `-c:a:#STREAMIDX# aac `;
+      // Set codec 
+      ffmpegCommandInsert += `-c:a:${newStreamIndex} aac `;
       
-      // Set bitrate for each new stream
-      if (useOriginalBitrate) {
-        ffmpegCommandInsert += `-b:a:#STREAMIDX# ${stream.bitrate || safeAudioBitrate}k `;
-      } else {
-        ffmpegCommandInsert += `-b:a:#STREAMIDX# ${safeAudioBitrate}k `;
-      }
+      // Set bitrate
+      const bitrate = useOriginalBitrate ? (stream.bitrate || safeAudioBitrate) : safeAudioBitrate;
+      ffmpegCommandInsert += `-b:a:${newStreamIndex} ${bitrate}k `;
       
-      // Preserve all metadata
+      // Set language
       if (stream.language) {
-        ffmpegCommandInsert += `-metadata:s:a:#STREAMIDX# language=${stream.language} `;
+        ffmpegCommandInsert += `-metadata:s:a:${newStreamIndex} language=${stream.language} `;
       }
       
-      if (stream.title) {
-        // Create a new title that indicates it's stereo
-        const newTitle = stream.title.includes('Stereo') ? 
-                        stream.title : 
-                        `${stream.title} (Stereo)`;
-        ffmpegCommandInsert += `-metadata:s:a:#STREAMIDX# title="${newTitle}" `;
-      } else {
-        // Add a basic title if none exists
-        ffmpegCommandInsert += `-metadata:s:a:#STREAMIDX# title="Stereo" `;
-      }
+      // Set title
+      const newTitle = stream.title ? 
+        (stream.title.includes('Stereo') ? stream.title : `${stream.title} (Stereo)`) : 
+        "Stereo";
+      ffmpegCommandInsert += `-metadata:s:a:${newStreamIndex} title="${newTitle}" `;
       
-      // Capture all other metadata tags
-      if (stream.tags) {
-        Object.entries(stream.tags).forEach(([key, value]) => {
-          // Skip language and title which we've already handled specifically
-          if (key !== 'language' && key !== 'title') {
-            ffmpegCommandInsert += `-metadata:s:a:#STREAMIDX# ${key}="${value}" `;
-          }
-        });
-      }
-
-      // Preserve all disposition flags
-      if (stream.disposition) {
-        Object.entries(stream.disposition).forEach(([key, value]) => {
-          // Skip default flag which we've already handled
-          if (key !== 'default' && value === 1) {
-            ffmpegCommandInsert += `-disposition:a:#STREAMIDX# ${key} `;
-          }
-        });
-      }
-
-      // Make the first converted stream default if the original was default
+      // Set default flag if original was default
       if (stream.default) {
-        ffmpegCommandInsert += `-disposition:a:#STREAMIDX# default `;
+        ffmpegCommandInsert += `-disposition:a:${newStreamIndex} default `;
       }
     });
-    
-    // Replace the stream index placeholder with actual indices
-    // This is safer than trying to calculate indices in advance
-    ffmpegCommandInsert = ffmpegCommandInsert.replace(/#STREAMIDX#/g, 'a');
     
     response.preset = `, ${ffmpegCommandInsert}`;
     response.infoLog += `✅ Will convert ${monoStreamsToConvert.length} mono track(s) to stereo\n`;
@@ -377,6 +337,8 @@ const plugin = (file, librarySettings, inputs, otherArguments) => {
     response.infoLog += `🔊 Using enhancement level: ${safeExtrastereoAmount}\n`;
     response.infoLog += `🔊 ${useOriginalBitrate ? 'Using original bitrates where available' : 'Using bitrate: ' + safeAudioBitrate + 'k'}\n`;
     response.infoLog += `🎧 Using ${isSpeedMode ? 'speed-optimized' : 'quality-optimized'} upmixing algorithm\n`;
+
+    response.infoLog += `\n\nFinal command: ffmpeg -i input.mkv ${ffmpegCommandInsert}`;
   } else {
     response.infoLog += '✅ No mono tracks to convert\n';
   }
